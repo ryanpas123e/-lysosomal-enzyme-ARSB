@@ -1,0 +1,152 @@
+# INDIVIDUAL LAB: LYSOSOMAL ENZYME SEQUENCE ANALYSIS
+# --------------------------------------------------
+# Run from your GitHub repository folder:
+#   Rscript lysosomal_enzyme_analysis.R
+# Or open this script in RStudio and set its folder as the working directory.
+# Before your first run, install the packages in the R Console:
+#   install.packages(c("rentrez", "ggplot2"))
+#
+# STEP 1. EDIT THESE TWO LINES for YOUR human lysosomal enzyme.
+# Example (GAA): NP_000143.2 is a human RefSeq protein accession.
+
+gene <- "ARSB"
+accession <- "NP_000037.2"
+
+# STEP 2. CHECK PACKAGES
+for (pkg in c("rentrez", "ggplot2")) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    stop("Package missing: ", pkg,
+         ". Install with install.packages('", pkg, "') and try again.")
+  }
+}
+
+# STEP 3. CREATE OUTPUT FOLDERS
+for (folder in c("data", "results", "figures")) {
+  dir.create(folder, showWarnings = FALSE, recursive = TRUE)
+}
+
+# STEP 4. DOWNLOAD ONE PROTEIN FASTA RECORD FROM NCBI
+message("Downloading ", accession, " from NCBI Protein...")
+fasta <- tryCatch(
+  rentrez::entrez_fetch(db = "protein", id = accession,
+                        rettype = "fasta", retmode = "text"),
+  error = function(e) stop("NCBI download failed. Verify your internet ",
+                          "connection and accession. Details: ", conditionMessage(e))
+)
+
+fasta_lines <- trimws(strsplit(fasta, "\n", fixed = TRUE)[[1]])
+headers <- startsWith(fasta_lines, ">")
+if (sum(headers) != 1L) {
+  stop("Expected exactly one FASTA protein record. Check the accession.")
+}
+
+protein <- toupper(paste(fasta_lines[!headers], collapse = ""))
+protein <- gsub("[[:space:]]", "", protein)
+if (!nzchar(protein) || grepl("[^A-Z]", protein)) {
+  stop("The downloaded record does not look like a protein sequence.")
+}
+
+# Avoid saving a misleading file if an incorrect accession was provided.
+if (nchar(protein) < 20L) stop("Protein sequence unexpectedly short.")
+writeLines(fasta, file.path("data", paste0(gene, ".fasta")))
+
+# STEP 5. SEQUENCE LENGTH AND AMINO ACID COMPOSITION
+amino_acids <- strsplit(protein, "", fixed = TRUE)[[1]]
+protein_length <- length(amino_acids)
+standard_aa <- strsplit("ACDEFGHIKLMNPQRSTVWY", "", fixed = TRUE)[[1]]
+counts <- table(factor(amino_acids, levels = standard_aa))
+composition <- data.frame(
+  amino_acid = standard_aa,
+  count = as.integer(counts),
+  percent = round(100 * as.integer(counts) / protein_length, 2)
+)
+
+# STEP 6. FIND POSSIBLE N-GLYCOSYLATION MOTIFS
+# Motif: N-X-S or N-X-T, where X is NOT proline (P).
+# A motif is only a sequence prediction, NOT evidence of glycosylation or M6P.
+# Exclude unknown residues at X so ambiguous sequence does not count as evidence.
+if (protein_length >= 3L) {
+  i <- seq_len(protein_length - 2L)
+  positions <- i[amino_acids[i] == "N" &
+                 amino_acids[i + 1L] %in% setdiff(standard_aa, "P") &
+                 amino_acids[i + 2L] %in% c("S", "T")]
+} else {
+  positions <- integer(0)
+}
+motifs <- if (length(positions)) {
+  substring(protein, positions, positions + 2L)
+} else character(0)
+
+motif_table <- data.frame(position = positions, motif = motifs)
+summary_table <- data.frame(
+  gene = gene,
+  accession = accession,
+  length_amino_acids = protein_length,
+  potential_N_glycosylation_motifs = length(positions)
+)
+
+write.csv(summary_table,
+          file.path("results", paste0(gene, "_summary.csv")),
+          row.names = FALSE)
+write.csv(composition,
+          file.path("results", paste0(gene, "_amino_acid_counts.csv")),
+          row.names = FALSE)
+write.csv(motif_table,
+          file.path("results", paste0(gene, "_motif_positions.csv")),
+          row.names = FALSE)
+
+# STEP 7. FIGURE 1: AMINO ACID COMPOSITION
+p1 <- ggplot2::ggplot(composition,
+                       ggplot2::aes(x = amino_acid, y = count)) +
+  ggplot2::geom_col(fill = "#37799D", width = 0.75) +
+  ggplot2::labs(title = paste(gene, "- amino acid composition"),
+                x = "Amino acid (one-letter code)", y = "Count") +
+  ggplot2::theme_minimal(base_size = 12)
+
+ggplot2::ggsave(
+  filename = file.path("figures", paste0(gene, "_amino_acid_composition.png")),
+  plot = p1, width = 8, height = 4.5, dpi = 300
+)
+
+# STEP 8. FIGURE 2: POSITIONS OF POTENTIAL N-GLYCOSYLATION MOTIFS
+p2 <- ggplot2::ggplot() +
+  ggplot2::geom_segment(ggplot2::aes(x = 1, xend = protein_length,
+                                     y = 1, yend = 1),
+                        linewidth = 1.8, color = "#89959F") +
+  ggplot2::labs(
+    title = paste(gene, "- possible N-glycosylation motifs"),
+    subtitle = paste(length(positions), "N-X-S/T motifs; X is not P"),
+    x = "Amino acid position", y = NULL
+  ) +
+  ggplot2::scale_x_continuous(limits = c(1, protein_length)) +
+  ggplot2::coord_cartesian(ylim = c(0.7, 1.3)) +
+  ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::theme(axis.text.y = ggplot2::element_blank(),
+                 axis.ticks.y = ggplot2::element_blank(),
+                 panel.grid.major.y = ggplot2::element_blank(),
+                 panel.grid.minor.y = ggplot2::element_blank())
+
+if (length(positions) > 0L) {
+  p2 <- p2 + ggplot2::geom_point(
+    data = motif_table,
+    ggplot2::aes(x = position, y = 1),
+    size = 3, color = "#C66B39"
+  )
+} else {
+  p2 <- p2 + ggplot2::annotate(
+    "text", x = protein_length / 2, y = 1.18,
+    label = "No potential motifs detected", size = 4
+  )
+}
+
+ggplot2::ggsave(
+  filename = file.path("figures", paste0(gene, "_potential_N_glycosylation.png")),
+  plot = p2, width = 8, height = 3.3, dpi = 300
+)
+
+# STEP 9. PRINT THE MAIN RESULTS
+cat("\nAnalysis complete for ", gene, " (", accession, ")\n", sep = "")
+print(summary_table)
+cat("\nFive most common amino acids:\n")
+print(head(composition[order(-composition$count), ], 5L), row.names = FALSE)
+cat("\nFiles saved in data/, results/, and figures/.\n")
